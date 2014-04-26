@@ -74,13 +74,14 @@
 #include <rte_string_fns.h>
 
 #include "main.h"
+#include "checksum.h"
 
 #define APP_LOOKUP_EXACT_MATCH          0
 #define APP_LOOKUP_LPM                  1
 #define DO_RFC_1812_CHECKS
 
 #ifndef APP_LOOKUP_METHOD
-#define APP_LOOKUP_METHOD             APP_LOOKUP_LPM
+#define APP_LOOKUP_METHOD             APP_LOOKUP_EXACT_MATCH
 #endif
 
 #define ENABLE_MULTI_BUFFER_OPTIMIZE	1
@@ -104,6 +105,8 @@
 	addr[12], addr[13],addr[14], addr[15]
 #endif
 
+#define IPV4_PKT_TYPE 0x0800
+#define IPV6_PKT_TYPE 0x86DD
 
 #define RTE_LOGTYPE_L3FWD RTE_LOGTYPE_USER1
 
@@ -172,7 +175,7 @@ static int promiscuous_on = 0; /**< Ports set in promiscuous mode off by default
 static int numa_on = 1; /**< NUMA is enabled by default. */
 
 #if (APP_LOOKUP_METHOD == APP_LOOKUP_EXACT_MATCH)	
-static int ipv6 = 0; /**< ipv6 is false by default. */
+static int ipv6 = 1; /**< ipv6 is false by default. */
 #endif
 
 struct mbuf_table {
@@ -317,6 +320,22 @@ union ipv6_5tuple_host {
 	__m128i xmm[XMM_NUM_IN_IPV6_5TUPLE];
 };
 
+/* Type of NAT. */
+#define SNAT 0
+#define DNAT 1
+
+/* IPv6 NAT Rule. */
+struct ipv6_nat_rule {
+        uint8_t nat_type;
+        uint8_t ip_target[IPV6_ADDR_LEN];
+        uint8_t if_out;
+};
+
+/* IPv6 NAT Route. */
+struct ipv6_nat_route {
+        struct ipv6_5tuple key;
+        struct ipv6_nat_rule rule;
+};
 struct ipv4_l3fwd_route {
 	struct ipv4_5tuple key;
 	uint8_t if_out;
@@ -327,14 +346,63 @@ struct ipv6_l3fwd_route {
 	uint8_t if_out;
 };
 
+/* IPv4 static route entries*/
 static struct ipv4_l3fwd_route ipv4_l3fwd_route_array[] = {
+	{{IPv4(2,2,2,2), IPv4(192,168,10,100), 63, 63, IPPROTO_UDP}, 1},
 	{{IPv4(101,0,0,0), IPv4(100,10,0,1),  101, 11, IPPROTO_TCP}, 0},
 	{{IPv4(201,0,0,0), IPv4(200,20,0,1),  102, 12, IPPROTO_TCP}, 1},
 	{{IPv4(111,0,0,0), IPv4(100,30,0,1),  101, 11, IPPROTO_TCP}, 2},
 	{{IPv4(211,0,0,0), IPv4(200,40,0,1),  102, 12, IPPROTO_TCP}, 3},
 };
 
+/* Static IPv6 nat rules*/
+static struct ipv6_nat_route ipv6_nat_route_array[] = {
+	{{
+	{0x30, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12,0x34},
+	{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x04,0x44,0xef,0xff,0xfe,0xce,0xf9,0x35},
+	0, 0, 0},
+	{SNAT, {0x30, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xab,0xcd}, 1}
+	},
+
+	{{
+	{0x30, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xab,0xcd},
+	{0x30, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12,0x34},
+	0, 0, 0},
+	{DNAT, {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x04,0x44,0xef,0xff,0xfe,0xce,0xf9,0x35}, 0}
+	},
+
+	{{
+	{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x05,0x55,0xef,0xff,0xfa,0xce,0x11,0x11},
+	{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x04,0x44,0xef,0xff,0xfe,0xce,0xf9,0x35},
+	0, 0, 0},
+	{SNAT, {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x05,0x55,0xef,0xff,0xfa,0xce,0x22,0x12}, 1}
+	},
+
+	{{
+	{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x05,0x55,0xef,0xff,0xfa,0xce,0x22,0x12},
+	{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x05,0x55,0xef,0xff,0xfa,0xce,0x11,0x11},
+	0, 0, 0},
+	{DNAT, {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x04,0x44,0xef,0xff,0xfe,0xce,0xf9,0x35}, 0}
+	}
+};
+
+/* Static IPv6 route entries*/
 static struct ipv6_l3fwd_route ipv6_l3fwd_route_array[] = {
+	{{
+	{0x30, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12,0x34},
+	{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x04,0x44,0xef,0xff,0xfe,0xce,0xf9,0x35},
+	63, 63, IPPROTO_UDP}, 1},
+
+	{{
+	{0x30, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12,0x34},
+	{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x04,0x44,0xef,0xff,0xfe,0xce,0xf8,0x35},
+	63, 63, IPPROTO_UDP}, 1},
+
+	{{
+	{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x05,0x55,0xef,0xff,0xfa,0xce,0x11,0x11},
+	{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x04,0x44,0xef,0xff,0xfe,0xce,0xf9,0x35},	
+	 63, 63, IPPROTO_UDP}, 1},
+
 	{{
 	{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x02, 0x1e, 0x67, 0xff, 0xfe, 0, 0, 0},
 	{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x02, 0x1b, 0x21, 0xff, 0xfe, 0x91, 0x38, 0x05},
@@ -448,6 +516,9 @@ ipv6_hash_crc(const void *data, __rte_unused uint32_t data_len, uint32_t init_va
 
 static uint8_t ipv4_l3fwd_out_if[L3FWD_HASH_ENTRIES] __rte_cache_aligned;
 static uint8_t ipv6_l3fwd_out_if[L3FWD_HASH_ENTRIES] __rte_cache_aligned;
+
+/*Array for maintaining NAT rules. */
+static struct ipv6_nat_rule ipv6_nat_rules[L3FWD_HASH_ENTRIES] __rte_cache_aligned;
 
 #endif
 
@@ -608,6 +679,82 @@ is_valid_ipv4_pkt(struct ipv4_hdr *pkt, uint32_t link_len)
 static __m128i mask0;
 static __m128i mask1;
 static __m128i mask2;
+static __m128i mask3;
+static __m128i mask4;
+
+/* 
+* Name : print_nat_rule
+* Desciption : Prints the NAT rules currently configured
+* Params :
+*	rule - The rule to be printed
+* Returns : None
+*/
+static inline void
+print_nat_rule(struct ipv6_nat_rule rule)
+{
+	int bytes;
+	char target_addr[40]={"0"};
+	char * target_addr_ptr = target_addr;
+	for(bytes = 0; bytes < 16; bytes ++)
+	{
+		char temp[2]="00";
+		if (! rule.ip_target[bytes] )
+			sprintf(temp, "%s", "00");
+		else
+			sprintf(temp, "%x", rule.ip_target[bytes]);
+
+		if(temp[1] == '\0')
+		{
+			char tchar = temp[0];
+			temp[0]='0';
+			temp[1] = tchar;
+		}
+
+		strcpy(target_addr_ptr, temp);
+		target_addr_ptr = (target_addr_ptr + 2);
+		if(((bytes%2) == 1) && (bytes <15))
+		{
+			strcpy(target_addr_ptr, ":");
+			target_addr_ptr = (target_addr_ptr + 1);
+		}
+	}                   
+		
+	printf("Nat Type = %s, Target = %s\n", rule.nat_type ? "DNAT":"SNAT", target_addr);
+}
+
+/* 
+* Name : apply_nat_and_get_port
+* Desciption : Gets the NAT rule for a packet, applies it on the packet header and recalculates transport header checksum
+* Params :
+*	rte_mbuf - pointer to the mbuf structure
+*	ipv6_hdr - pointer to the ipv6_hdr to which the NAT rule is applied
+*	ret      - the index into the rules array
+* Returns :
+* 	the port on which the packet needs to be forwarded
+*/
+static inline uint8_t
+apply_nat_and_get_port(struct rte_mbuf *m, struct ipv6_hdr *ipv6_hdr, int index)
+{
+	int iter;
+	struct ipv6_nat_rule rule;
+	rule = ipv6_nat_rules[index];
+//	print_nat_rule(rule);
+	/* check type of NAT. */
+	if(rule.nat_type == SNAT)
+		for(iter = 0; iter < 16; iter ++)
+			ipv6_hdr->src_addr[iter] = rule.ip_target[iter];
+	else
+		for(iter = 0; iter < 16; iter ++)
+	    	ipv6_hdr->dst_addr[iter] = rule.ip_target[iter];
+
+	/* checksum calculation. */
+	void *transport_header = (void *)(rte_pktmbuf_mtod(m, unsigned char *) +
+	                       sizeof(struct ether_hdr) + sizeof(struct ipv6_hdr));
+
+	compute_checksum(ipv6_hdr, transport_header);
+	return rule.if_out;
+}
+
 static inline uint8_t
 get_ipv4_dst_port(void *ipv4_hdr, uint8_t portid, lookup_struct_t * ipv4_l3fwd_lookup_struct)
 {
@@ -643,6 +790,39 @@ get_ipv6_dst_port(void *ipv6_hdr,  uint8_t portid, lookup_struct_t * ipv6_l3fwd_
 	/* Find destination port */
 	ret = rte_hash_lookup(ipv6_l3fwd_lookup_struct, (const void *)&key);
 	return (uint8_t)((ret < 0)? portid : ipv6_l3fwd_out_if[ret]);
+}
+
+/* 
+* Name : get_ipv6_nat_rule_index
+* Desciption : Looks up for NAT rules in a hash, which match a given packet
+* Params :
+*	ipv6_hdr - pointer to the ipv6_hdr which should be looked up
+*	ipv6_l3fwd_lookup_struct - pointer to the hash which needs to be looked into
+* Returns :
+* 	An index into the NAT rules array if there is a match in the hash.
+*	-1 if there is no match
+*/
+static inline int
+get_ipv6_nat_rule_index(void *ipv6_hdr, lookup_struct_t * ipv6_l3fwd_lookup_struct)
+{
+	int ret = 0;
+	union ipv6_5tuple_host key;
+
+	ipv6_hdr = (uint8_t *)ipv6_hdr + offsetof(struct ipv6_hdr, payload_len);
+	__m128i data0 = _mm_loadu_si128((__m128i*)(ipv6_hdr));
+	__m128i data1 = _mm_loadu_si128((__m128i*)(((uint8_t*)ipv6_hdr)+sizeof(__m128i)));
+	__m128i data2 = _mm_loadu_si128((__m128i*)(((uint8_t*)ipv6_hdr)+sizeof(__m128i)+sizeof(__m128i)));
+	/* Get part of 5 tuple: src IP address lower 96 bits */
+	key.xmm[0] = _mm_and_si128(data0, mask3);
+	/* Get part of 5 tuple: dst IP address lower 96 bits and src IP address higher 32 bits */
+	key.xmm[1] = data1;
+	/* Get part of 5 tuple: dst IP address higher 32 bits */
+	key.xmm[2] = _mm_and_si128(data2, mask4);
+
+	/* Find destination port */
+	ret = rte_hash_lookup(ipv6_l3fwd_lookup_struct, (const void *)&key);
+
+	return ((ret < 0)? -1 : ret);
 }
 #endif
 
@@ -823,10 +1003,10 @@ simple_ipv6_fwd_4pkts(struct rte_mbuf* m[4], uint8_t portid, struct lcore_conf *
 {
 	struct ether_hdr *eth_hdr[4];
 	__attribute__((unused)) struct ipv6_hdr *ipv6_hdr[4];
+	int lookup_index[4] = {-1,-1,-1,-1};
 	void *d_addr_bytes[4];
 	uint8_t dst_port[4];
-	int32_t ret[4];
-	union ipv6_5tuple_host key[4];
+	int count;
 
 	eth_hdr[0] = rte_pktmbuf_mtod(m[0], struct ether_hdr *);
 	eth_hdr[1] = rte_pktmbuf_mtod(m[1], struct ether_hdr *);
@@ -843,17 +1023,19 @@ simple_ipv6_fwd_4pkts(struct rte_mbuf* m[4], uint8_t portid, struct lcore_conf *
 	ipv6_hdr[3] = (struct ipv6_hdr *)(rte_pktmbuf_mtod(m[3], unsigned char *) +
 			sizeof(struct ether_hdr));
 
-	get_ipv6_5tuple(m[0], mask1, mask2, &key[0]);
-	get_ipv6_5tuple(m[1], mask1, mask2, &key[1]);
-	get_ipv6_5tuple(m[2], mask1, mask2, &key[2]);
-	get_ipv6_5tuple(m[3], mask1, mask2, &key[3]);
-	
-	const void *key_array[4] = {&key[0], &key[1], &key[2],&key[3]};
-	rte_hash_lookup_multi(qconf->ipv6_lookup_struct, &key_array[0], 4, ret);
-	dst_port[0] = (uint8_t) ((ret[0] < 0)? portid:ipv6_l3fwd_out_if[ret[0]]);
-	dst_port[1] = (uint8_t) ((ret[1] < 0)? portid:ipv6_l3fwd_out_if[ret[1]]);
-	dst_port[2] = (uint8_t) ((ret[2] < 0)? portid:ipv6_l3fwd_out_if[ret[2]]);
-	dst_port[3] = (uint8_t) ((ret[3] < 0)? portid:ipv6_l3fwd_out_if[ret[3]]);
+	for(count=0; count<4; count++) {
+#if (APP_LOOKUP_METHOD == APP_LOOKUP_EXACT_MATCH)              
+		lookup_index[count] = get_ipv6_nat_rule_index(ipv6_hdr[count], qconf->ipv6_lookup_struct);
+#endif /* APP_LOOKUP_METHOD == APP_LOOKUP_EXACT_MATCH */
+		if(lookup_index[count] == -1) {
+			dst_port[count] = get_ipv6_dst_port(ipv6_hdr[count], portid, qconf->ipv6_lookup_struct);
+		}	
+#if (APP_LOOKUP_METHOD == APP_LOOKUP_EXACT_MATCH)              
+		else {
+			dst_port[count] = apply_nat_and_get_port(m[count], ipv6_hdr[count], lookup_index[count]);
+		}	 
+#endif /* (APP_LOOKUP_METHOD == APP_LOOKUP_EXACT_MATCH) */           
+	}
 
 	if (dst_port[0] >= RTE_MAX_ETHPORTS || (enabled_port_mask & 1 << dst_port[0]) == 0)
 		dst_port[0] = portid;
@@ -897,8 +1079,7 @@ l3fwd_simple_forward(struct rte_mbuf *m, uint8_t portid, struct lcore_conf *qcon
 	uint8_t dst_port;
 
 	eth_hdr = rte_pktmbuf_mtod(m, struct ether_hdr *);
-
-	if (m->ol_flags & PKT_RX_IPV4_HDR) {
+	if (ntohs(eth_hdr->ether_type) & IPV4_PKT_TYPE) {
 		/* Handle IPv4 headers.*/
 		ipv4_hdr = (struct ipv4_hdr *)(rte_pktmbuf_mtod(m, unsigned char *) +
 				sizeof(struct ether_hdr));
@@ -933,11 +1114,21 @@ l3fwd_simple_forward(struct rte_mbuf *m, uint8_t portid, struct lcore_conf *qcon
 	} else {
 		/* Handle IPv6 headers.*/
 		struct ipv6_hdr *ipv6_hdr;
-
+		int ret = -1;  
 		ipv6_hdr = (struct ipv6_hdr *)(rte_pktmbuf_mtod(m, unsigned char *) +
-				sizeof(struct ether_hdr));
+						sizeof(struct ether_hdr));
+#if (APP_LOOKUP_METHOD == APP_LOOKUP_EXACT_MATCH)              
+		ret = get_ipv6_nat_rule_index(ipv6_hdr, qconf->ipv6_lookup_struct);
+#endif /* APP_LOOKUP_METHOD == APP_LOOKUP_EXACT_MATCH */
 
-		dst_port = get_ipv6_dst_port(ipv6_hdr, portid, qconf->ipv6_lookup_struct);
+		if (ret == -1) {
+			dst_port = get_ipv6_dst_port(ipv6_hdr, portid, qconf->ipv6_lookup_struct);
+		}
+#if (APP_LOOKUP_METHOD == APP_LOOKUP_EXACT_MATCH)              
+		else {
+		    	dst_port = apply_nat_and_get_port(m, ipv6_hdr, ret);
+	    }               
+#endif /* APP_LOOKUP_METHOD == APP_LOOKUP_EXACT_MATCH */
 
 		if (dst_port >= RTE_MAX_ETHPORTS || (enabled_port_mask & 1 << dst_port) == 0)
 			dst_port = portid;
@@ -964,6 +1155,8 @@ main_loop(__attribute__((unused)) void *dummy)
 	int i, j, nb_rx;
 	uint8_t portid, queueid;
 	struct lcore_conf *qconf;
+	struct ether_hdr *eth_hdr[4];
+	int hdr_flag;
 	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;
 
 	prev_tsc = 0;
@@ -976,7 +1169,7 @@ main_loop(__attribute__((unused)) void *dummy)
 		return 0;
 	}
 
-	RTE_LOG(INFO, L3FWD, "entering main loop on lcore %u\n", lcore_id);
+	RTE_LOG(INFO, L3FWD, "Entering main loop on lcore %u\n", lcore_id);
 
 	for (i = 0; i < qconf->n_rx_queue; i++) {
 
@@ -1024,14 +1217,19 @@ main_loop(__attribute__((unused)) void *dummy)
 				/* Send nb_rx - nb_rx%4 packets in groups of 4.*/
 				int32_t n = RTE_ALIGN_FLOOR(nb_rx, 4);
 				for (j = 0; j < n ; j+=4) {
-					uint32_t ol_flag = pkts_burst[j]->ol_flags 
-							& pkts_burst[j+1]->ol_flags
-							& pkts_burst[j+2]->ol_flags 
-							& pkts_burst[j+3]->ol_flags;
-					if (ol_flag & PKT_RX_IPV4_HDR ) {
+					eth_hdr[j] = rte_pktmbuf_mtod(pkts_burst[j], struct ether_hdr *);
+					eth_hdr[j+1] = rte_pktmbuf_mtod(pkts_burst[j+1], struct ether_hdr *);
+					eth_hdr[j+2] = rte_pktmbuf_mtod(pkts_burst[j+2], struct ether_hdr *);
+					eth_hdr[j+3] = rte_pktmbuf_mtod(pkts_burst[j+3], struct ether_hdr *);
+					hdr_flag = ntohs(eth_hdr[j]->ether_type
+								& eth_hdr[j+1]->ether_type
+								& eth_hdr[j+2]->ether_type
+								& eth_hdr[j+3]->ether_type);
+
+					if (hdr_flag == IPV4_PKT_TYPE ) {
 						simple_ipv4_fwd_4pkts(&pkts_burst[j], 
 									portid, qconf);
-					} else if (ol_flag & PKT_RX_IPV6_HDR) {
+					} else if (hdr_flag == IPV6_PKT_TYPE) {
 						simple_ipv6_fwd_4pkts(&pkts_burst[j], 
 									portid, qconf);
 					} else {
@@ -1474,9 +1672,12 @@ populate_ipv6_few_flow_into_table(const struct rte_hash* h)
 	uint32_t i;
 	int32_t ret;
 	uint32_t array_len = sizeof(ipv6_l3fwd_route_array)/sizeof(ipv6_l3fwd_route_array[0]); 
+	uint32_t nat_array_len = sizeof(ipv6_nat_route_array)/sizeof(ipv6_nat_route_array[0]);
 
 	mask1 = _mm_set_epi32(ALL_32_BITS, ALL_32_BITS, ALL_32_BITS, BIT_16_TO_23);
 	mask2 = _mm_set_epi32(0, 0, ALL_32_BITS, ALL_32_BITS);
+	mask3 = _mm_set_epi32(ALL_32_BITS, ALL_32_BITS, ALL_32_BITS, 0);
+	mask4 = _mm_set_epi32(0, 0, 0, ALL_32_BITS);
 	for (i = 0; i < array_len; i++) {
 		struct ipv6_l3fwd_route entry;
 		union ipv6_5tuple_host newkey;
@@ -1489,7 +1690,23 @@ populate_ipv6_few_flow_into_table(const struct rte_hash* h)
 		}
 		ipv6_l3fwd_out_if[ret] = entry.if_out;
 	}
-	printf("Hash: Adding 0x%xkeys\n", array_len);
+	RTE_LOG(INFO, L3FWD,"Hash: Adding 0x%xkeys\n", array_len);
+
+	/* Adding nat rules into hash. */
+	for (i = 0; i < nat_array_len; i++) {
+		struct ipv6_nat_route entry;
+		union ipv6_5tuple_host newkey;
+		entry = ipv6_nat_route_array[i];
+		convert_ipv6_5tuple(&entry.key, &newkey);
+		ret = rte_hash_add_key (h, (void *) &newkey);
+		if (ret < 0) {
+	        rte_exit(EXIT_FAILURE, "Unable to add entry %u to the"
+		                           "l3fwd hash.\n", i);
+		}
+		ipv6_nat_rules[ret] = entry.rule;
+		RTE_LOG(INFO, L3FWD,"adding %d port to array\n", entry.rule.if_out);
+	}
+	RTE_LOG(INFO, L3FWD,"Hash: Adding 0x%xkeys\n", nat_array_len);
 }
 
 #define NUMBER_PORT_USED 4
@@ -1533,7 +1750,7 @@ populate_ipv4_many_flow_into_table(const struct rte_hash* h,
 		ipv4_l3fwd_out_if[ret] = (uint8_t) entry.if_out;
 
 	}
-	printf("Hash: Adding 0x%x keys\n", nr_flow);
+	RTE_LOG(INFO, L3FWD,"Hash: Adding 0x%x keys\n", nr_flow);
 }
 
 static inline void
