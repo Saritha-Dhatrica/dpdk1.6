@@ -683,14 +683,14 @@ static __m128i mask3;
 static __m128i mask4;
 
 /* 
-* Name : print_nat_rule
-* Desciption : Prints the NAT rules currently configured
+* Name : print_ipv6_addr
+* Desciption : Prints the IPv6 address
 * Params :
-*	rule - The rule to be printed
+*	addr - IPv6 Address to be printed
 * Returns : None
 */
 static inline void
-print_nat_rule(struct ipv6_nat_rule rule)
+print_ipv6_addr(uint8_t addr[])
 {
 	int bytes;
 	char target_addr[40]={"0"};
@@ -698,10 +698,8 @@ print_nat_rule(struct ipv6_nat_rule rule)
 	for(bytes = 0; bytes < 16; bytes ++)
 	{
 		char temp[2]="00";
-		if (! rule.ip_target[bytes] )
-			sprintf(temp, "%s", "00");
-		else
-			sprintf(temp, "%x", rule.ip_target[bytes]);
+		if ( addr[bytes] )
+			sprintf(temp, "%x", addr[bytes]);
 
 		if(temp[1] == '\0')
 		{
@@ -718,11 +716,41 @@ print_nat_rule(struct ipv6_nat_rule rule)
 			target_addr_ptr = (target_addr_ptr + 1);
 		}
 	}                   
-		
-	printf("Nat Type = %s, Target = %s\n", rule.nat_type ? "DNAT":"SNAT", target_addr);
+	printf(" %s ", target_addr);
 }
 
 /* 
+* Name : print_nat_rule
+* Desciption : Print nat rules
+* Params : None
+* Returns : None
+*/
+static inline void
+print_nat_rule()
+{
+	int8_t count;
+	struct ipv6_nat_route nat_route;
+	struct ipv6_nat_rule rule;
+	uint32_t nat_array_len = sizeof(ipv6_nat_route_array)/sizeof(ipv6_nat_route_array[0]);
+	printf("--------------------------------------------------------------------------------------------------------\n");
+	printf("SNO\tNAT-TYPE ADDR\t\t\t\t\t  TARGET-ADDR\t\t\t\t  IF_OUT\n");
+	for (count=0; count < nat_array_len; count++)
+	{
+		nat_route = ipv6_nat_route_array[count];
+		rule = nat_route.rule;
+		printf("%d\t%s\t",count+1,rule.nat_type?"DNAT":"SNAT");
+		if (rule.nat_type == SNAT)
+			print_ipv6_addr(nat_route.key.ip_src);
+		else
+			print_ipv6_addr(nat_route.key.ip_dst);
+		print_ipv6_addr(rule.ip_target);
+		printf("  %d \n",rule.if_out);
+	}
+	printf("--------------------------------------------------------------------------------------------------------\n");
+}
+
+
+/*
 * Name : apply_nat_and_get_port
 * Desciption : Gets the NAT rule for a packet, applies it on the packet header and recalculates transport header checksum
 * Params :
@@ -738,7 +766,6 @@ apply_nat_and_get_port(struct rte_mbuf *m, struct ipv6_hdr *ipv6_hdr, int index)
 	int iter;
 	struct ipv6_nat_rule rule;
 	rule = ipv6_nat_rules[index];
-//	print_nat_rule(rule);
 	/* check type of NAT. */
 	if(rule.nat_type == SNAT)
 		for(iter = 0; iter < 16; iter ++)
@@ -1003,7 +1030,7 @@ simple_ipv6_fwd_4pkts(struct rte_mbuf* m[4], uint8_t portid, struct lcore_conf *
 {
 	struct ether_hdr *eth_hdr[4];
 	__attribute__((unused)) struct ipv6_hdr *ipv6_hdr[4];
-	int lookup_index[4] = {-1,-1,-1,-1};
+	int lookup_index[4] = {-1};
 	void *d_addr_bytes[4];
 	uint8_t dst_port[4];
 	int count;
@@ -1662,7 +1689,7 @@ populate_ipv4_few_flow_into_table(const struct rte_hash* h)
 		}
 		ipv4_l3fwd_out_if[ret] = entry.if_out;
 	}
-	printf("Hash: Adding 0x%x keys\n", array_len);
+	printf("Hash: Adding IPv4 0x%x keys\n", array_len);
 }
 
 #define BIT_16_TO_23 0x00ff0000
@@ -1690,7 +1717,7 @@ populate_ipv6_few_flow_into_table(const struct rte_hash* h)
 		}
 		ipv6_l3fwd_out_if[ret] = entry.if_out;
 	}
-	RTE_LOG(INFO, L3FWD,"Hash: Adding 0x%xkeys\n", array_len);
+	RTE_LOG(INFO, L3FWD,"Hash: Adding IPv6 Route 0x%xkeys\n", array_len);
 
 	/* Adding nat rules into hash. */
 	for (i = 0; i < nat_array_len; i++) {
@@ -1706,7 +1733,7 @@ populate_ipv6_few_flow_into_table(const struct rte_hash* h)
 		ipv6_nat_rules[ret] = entry.rule;
 		RTE_LOG(INFO, L3FWD,"adding %d port to array\n", entry.rule.if_out);
 	}
-	RTE_LOG(INFO, L3FWD,"Hash: Adding 0x%xkeys\n", nat_array_len);
+	RTE_LOG(INFO, L3FWD,"Hash: Adding IPv6 Nat 0x%xkeys\n", nat_array_len);
 }
 
 #define NUMBER_PORT_USED 4
@@ -1844,13 +1871,12 @@ setup_hash(int socketid)
 		}
 	} else {
 		/* Use data in ipv4/ipv6 l3fwd lookup table directly to initialize the hash table */
-		if (ipv6 == 0) {
-			/* populate the ipv4 hash */
-			populate_ipv4_few_flow_into_table(ipv4_l3fwd_lookup_struct[socketid]);
-		} else {
-			/* populate the ipv6 hash */
-			populate_ipv6_few_flow_into_table(ipv6_l3fwd_lookup_struct[socketid]);
-		}
+		/* populate the ipv4 hash */
+		populate_ipv4_few_flow_into_table(ipv4_l3fwd_lookup_struct[socketid]);
+		/* populate the ipv6 hash */
+		populate_ipv6_few_flow_into_table(ipv6_l3fwd_lookup_struct[socketid]);
+		printf("\nExisting NAT Rules : \n");
+		print_nat_rule();
 	}
 }
 #endif
