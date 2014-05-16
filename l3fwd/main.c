@@ -726,9 +726,9 @@ print_ipv6_addr(uint8_t addr[])
 * Returns : None
 */
 static inline void
-print_nat_rule()
+print_nat_rule(void)
 {
-	int8_t count;
+	uint32_t count;
 	struct ipv6_nat_route nat_route;
 	struct ipv6_nat_rule rule;
 	uint32_t nat_array_len = sizeof(ipv6_nat_route_array)/sizeof(ipv6_nat_route_array[0]);
